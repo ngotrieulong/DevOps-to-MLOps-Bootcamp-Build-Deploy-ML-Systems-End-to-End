@@ -14,6 +14,7 @@ import logging
 from mlflow.tracking import MlflowClient
 import platform
 import sklearn
+import sys
 
 # -----------------------------
 # Configure logging
@@ -150,5 +151,8 @@ def main(args):
         logger.info(f"Final MAE: {mae:.2f}, R²: {r2:.4f}")
 
 if __name__ == "__main__":
+    print("check version", joblib.__version__, np.__version__)
+    print("Python version:", platform.python_version())
+    print("Python executable path:", sys.executable)
     args = parse_args()
     main(args)

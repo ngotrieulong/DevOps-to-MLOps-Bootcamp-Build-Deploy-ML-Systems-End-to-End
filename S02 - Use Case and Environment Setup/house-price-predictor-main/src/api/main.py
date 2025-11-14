@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from inference import predict_price, batch_predict
 from schemas import HousePredictionRequest, PredictionResponse
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 
 # Initialize FastAPI app with metadata
 app = FastAPI(
@@ -23,7 +28,7 @@ app = FastAPI(
     },
 )
 
-# Add CORS middleware
+# Add CORS middleware --> who allowed to access the API?
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
