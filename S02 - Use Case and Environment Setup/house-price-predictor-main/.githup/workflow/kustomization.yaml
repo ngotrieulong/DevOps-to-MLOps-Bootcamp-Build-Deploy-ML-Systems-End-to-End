@@ -1,0 +1,63 @@
+# ============================================
+# Kustomization for Kubeflow Pipeline
+# ============================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kubeflow
+
+# Resources to deploy
+resources:
+  - k8s-resources.yaml
+  - kubeflow-pipeline.yaml
+
+# Common labels applied to all resources
+commonLabels:
+  app: house-price-predictor
+  environment: production
+  managed-by: kustomize
+
+# Common annotations
+commonAnnotations:
+  description: "MLOps pipeline for house price prediction"
+  version: "1.0.0"
+
+# ConfigMap generator for environment-specific configs
+configMapGenerator:
+  - name: app-config
+    literals:
+      - LOG_LEVEL=INFO
+      - API_VERSION=v1
+      - MODEL_VERSION=1.0.0
+
+# Secret generator (for development only - use external secret management in production)
+secretGenerator:
+  - name: app-secrets
+    literals:
+      - API_KEY=dev-api-key-changeme
+
+# Image tags - update these for new versions
+images:
+  - name: house-price-predictor
+    newTag: latest
+
+# Patches for environment-specific customizations
+patchesStrategicMerge:
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: house-price-predictor
+      namespace: kubeflow
+    spec:
+      template:
+        spec:
+          containers:
+          - name: predictor
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1"

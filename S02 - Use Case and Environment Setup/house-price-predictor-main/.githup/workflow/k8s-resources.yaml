@@ -1,0 +1,351 @@
+# ============================================
+# Namespace for the MLOps application
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeflow
+  labels:
+    app: mlops-pipeline
+
+---
+# ============================================
+# Persistent Volume Claim for Model Storage
+# ============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-pvc
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+# ============================================
+# Persistent Volume Claim for Data Storage
+# ============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-pvc
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+
+---
+# ============================================
+# ConfigMap for Model Configuration
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-config
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+data:
+  model_config.yaml: |
+    model:
+      best_model: XGBoost
+      feature_sets:
+        rfe:
+        - sqft
+        - bedrooms
+        - bathrooms
+        - location
+        - year_built
+        - condition
+      mae: 27056.235294117647
+      name: house_price_model
+      parameters:
+        learning_rate: 0.1
+        max_depth: 3
+        n_estimators: 100
+        objective: reg:squarederror
+        enable_categorical: false
+      r2_score: 0.966982149104715
+      target_variable: price
+
+---
+# ============================================
+# ConfigMap for Pipeline Configuration
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-config
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+data:
+  # MLflow configuration
+  MLFLOW_TRACKING_URI: "http://mlflow-server:5000"
+  MLFLOW_EXPERIMENT_NAME: "house-price-prediction"
+
+  # Model validation thresholds
+  MAX_MAE: "50000"
+  MIN_R2: "0.85"
+
+  # Data paths
+  RAW_DATA_PATH: "/data/raw/house_data.csv"
+  CLEANED_DATA_PATH: "/data/processed/cleaned_house_data.csv"
+  FEATURED_DATA_PATH: "/data/processed/featured_house_data.csv"
+
+  # Model paths
+  MODEL_PATH: "/models/trained/house_price_model.pkl"
+  PREPROCESSOR_PATH: "/models/preprocessor.pkl"
+
+---
+# ============================================
+# Secret for MLflow and Registry Credentials
+# ============================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlops-secrets
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+type: Opaque
+stringData:
+  # MLflow credentials (if authentication is enabled)
+  MLFLOW_TRACKING_USERNAME: "admin"
+  MLFLOW_TRACKING_PASSWORD: "changeme"
+
+  # Docker registry credentials (if using private registry)
+  DOCKER_REGISTRY_USERNAME: "your-username"
+  DOCKER_REGISTRY_PASSWORD: "your-password"
+
+  # AWS credentials (if using S3 for artifact storage)
+  AWS_ACCESS_KEY_ID: "your-access-key"
+  AWS_SECRET_ACCESS_KEY: "your-secret-key"
+
+---
+# ============================================
+# ServiceAccount for Pipeline Runner
+# ============================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-runner
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+
+---
+# ============================================
+# Role for Pipeline Operations
+# ============================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-role
+  namespace: kubeflow
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "create"]
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows", "workflowtemplates"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ============================================
+# RoleBinding for Pipeline Runner
+# ============================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-role-binding
+  namespace: kubeflow
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner
+  namespace: kubeflow
+roleRef:
+  kind: Role
+  name: pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ============================================
+# MLflow Server Deployment
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+  namespace: kubeflow
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+      - name: mlflow
+        image: ghcr.io/mlflow/mlflow:v2.3.1
+        command:
+        - mlflow
+        - server
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "5000"
+        - --backend-store-uri
+        - "sqlite:///mlflow/mlflow.db"
+        - --default-artifact-root
+        - "/mlflow/artifacts"
+        ports:
+        - containerPort: 5000
+          name: http
+        volumeMounts:
+        - name: mlflow-storage
+          mountPath: /mlflow
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: mlflow-storage
+        persistentVolumeClaim:
+          claimName: mlflow-pvc
+
+---
+# ============================================
+# MLflow Server Service
+# ============================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-server
+  namespace: kubeflow
+  labels:
+    app: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+  - port: 5000
+    targetPort: 5000
+    protocol: TCP
+    name: http
+  type: ClusterIP
+
+---
+# ============================================
+# MLflow PVC
+# ============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-pvc
+  namespace: kubeflow
+  labels:
+    app: mlflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+# ============================================
+# Horizontal Pod Autoscaler for API
+# ============================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: house-price-predictor-hpa
+  namespace: kubeflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: house-price-predictor
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# ============================================
+# Network Policy for Security
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlops-network-policy
+  namespace: kubeflow
+spec:
+  podSelector:
+    matchLabels:
+      app: house-price-predictor
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kubeflow
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kubeflow
+    ports:
+    - protocol: TCP
+      port: 5000  # MLflow
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53  # DNS
+    - protocol: UDP
+      port: 53  # DNS

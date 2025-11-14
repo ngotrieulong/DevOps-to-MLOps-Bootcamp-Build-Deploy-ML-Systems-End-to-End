@@ -1,0 +1,375 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: house-price-mlops-pipeline-
+  namespace: kubeflow
+  labels:
+    app: house-price-predictor
+    pipeline-type: mlops
+spec:
+  entrypoint: mlops-pipeline
+  serviceAccountName: pipeline-runner
+
+  # Volume templates for sharing data between steps
+  volumeClaimTemplates:
+  - metadata:
+      name: data-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+  - metadata:
+      name: model-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 5Gi
+
+  # Define the main pipeline DAG
+  templates:
+  - name: mlops-pipeline
+    dag:
+      tasks:
+      # Step 1: Data Processing
+      - name: data-processing
+        template: data-processing-step
+
+      # Step 2: Feature Engineering (depends on data-processing)
+      - name: feature-engineering
+        dependencies: [data-processing]
+        template: feature-engineering-step
+
+      # Step 3: Model Training (depends on feature-engineering)
+      - name: model-training
+        dependencies: [feature-engineering]
+        template: model-training-step
+
+      # Step 4: Model Validation (depends on model-training)
+      - name: model-validation
+        dependencies: [model-training]
+        template: model-validation-step
+
+      # Step 5: Model Registry (depends on model-validation)
+      - name: model-registry
+        dependencies: [model-validation]
+        template: model-registry-step
+        when: "{{tasks.model-validation.outputs.parameters.validation-passed}} == true"
+
+      # Step 6: Model Deployment (depends on model-registry)
+      - name: model-deployment
+        dependencies: [model-registry]
+        template: model-deployment-step
+
+  # ============================================
+  # Step 1: Data Processing
+  # ============================================
+  - name: data-processing-step
+    container:
+      image: house-price-predictor:latest
+      command: [python]
+      args:
+      - -c
+      - |
+        from src.data.run_processing import process_data
+        import os
+
+        input_file = '/data/raw/house_data.csv'
+        output_file = '/data/processed/cleaned_house_data.csv'
+
+        print(f"Starting data processing...")
+        if os.path.exists(input_file):
+            process_data(input_file, output_file)
+            print(f"Data processing completed: {output_file}")
+        else:
+            print(f"ERROR: Input file not found: {input_file}")
+            exit(1)
+      volumeMounts:
+      - name: data-volume
+        mountPath: /data
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+
+  # ============================================
+  # Step 2: Feature Engineering
+  # ============================================
+  - name: feature-engineering-step
+    container:
+      image: house-price-predictor:latest
+      command: [python]
+      args:
+      - src/features/engineer.py
+      - --input
+      - /data/processed/cleaned_house_data.csv
+      - --output
+      - /data/processed/featured_house_data.csv
+      - --preprocessor
+      - /models/preprocessor.pkl
+      volumeMounts:
+      - name: data-volume
+        mountPath: /data
+      - name: model-volume
+        mountPath: /models
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+
+  # ============================================
+  # Step 3: Model Training
+  # ============================================
+  - name: model-training-step
+    container:
+      image: house-price-predictor:latest
+      command: [python]
+      args:
+      - src/models/train_model.py
+      - --config
+      - /configs/model_config.yaml
+      - --data
+      - /data/processed/featured_house_data.csv
+      - --models-dir
+      - /models
+      - --mlflow-tracking-uri
+      - http://mlflow-server:5000
+      volumeMounts:
+      - name: data-volume
+        mountPath: /data
+      - name: model-volume
+        mountPath: /models
+      env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow-server:5000"
+      - name: MLFLOW_EXPERIMENT_NAME
+        value: "house-price-prediction"
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "2"
+        limits:
+          memory: "8Gi"
+          cpu: "4"
+    outputs:
+      parameters:
+      - name: model-path
+        valueFrom:
+          path: /models/trained/house_price_model.pkl
+      - name: mae
+        valueFrom:
+          path: /tmp/metrics/mae.txt
+      - name: r2-score
+        valueFrom:
+          path: /tmp/metrics/r2.txt
+
+  # ============================================
+  # Step 4: Model Validation
+  # ============================================
+  - name: model-validation-step
+    inputs:
+      parameters:
+      - name: mae
+      - name: r2-score
+    container:
+      image: house-price-predictor:latest
+      command: [python]
+      args:
+      - -c
+      - |
+        import sys
+
+        mae = float("{{inputs.parameters.mae}}")
+        r2 = float("{{inputs.parameters.r2-score}}")
+
+        print(f"Model Performance Metrics:")
+        print(f"  MAE: {mae:.2f}")
+        print(f"  R²: {r2:.4f}")
+
+        # Define thresholds
+        MAX_MAE = 50000
+        MIN_R2 = 0.85
+
+        validation_passed = True
+
+        if mae > MAX_MAE:
+            print(f"FAILED: MAE {mae} exceeds threshold {MAX_MAE}")
+            validation_passed = False
+
+        if r2 < MIN_R2:
+            print(f"FAILED: R² {r2} below threshold {MIN_R2}")
+            validation_passed = False
+
+        if validation_passed:
+            print("✓ Model validation PASSED")
+            with open('/tmp/validation-result.txt', 'w') as f:
+                f.write('true')
+        else:
+            print("✗ Model validation FAILED")
+            with open('/tmp/validation-result.txt', 'w') as f:
+                f.write('false')
+            sys.exit(1)
+    outputs:
+      parameters:
+      - name: validation-passed
+        valueFrom:
+          path: /tmp/validation-result.txt
+
+  # ============================================
+  # Step 5: Model Registry
+  # ============================================
+  - name: model-registry-step
+    container:
+      image: house-price-predictor:latest
+      command: [python]
+      args:
+      - -c
+      - |
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        import yaml
+
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        client = MlflowClient()
+
+        # Load model config
+        with open('/configs/model_config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+
+        model_name = config['model']['name']
+        print(f"Registering model: {model_name}")
+
+        # Get latest run
+        experiment = mlflow.get_experiment_by_name("house-price-prediction")
+        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id], order_by=["start_time desc"], max_results=1)
+
+        if not runs.empty:
+            run_id = runs.iloc[0].run_id
+            model_uri = f"runs:/{run_id}/tuned_model"
+
+            # Register model
+            try:
+                client.create_registered_model(model_name)
+            except:
+                pass  # Model already exists
+
+            model_version = client.create_model_version(
+                name=model_name,
+                source=model_uri,
+                run_id=run_id
+            )
+
+            # Transition to Production
+            client.transition_model_version_stage(
+                name=model_name,
+                version=model_version.version,
+                stage="Production"
+            )
+
+            print(f"Model registered successfully: {model_name} v{model_version.version}")
+            print(f"Model stage: Production")
+        else:
+            print("ERROR: No MLflow runs found")
+            exit(1)
+      volumeMounts:
+      - name: model-volume
+        mountPath: /models
+      env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow-server:5000"
+
+  # ============================================
+  # Step 6: Model Deployment
+  # ============================================
+  - name: model-deployment-step
+    resource:
+      action: apply
+      manifest: |
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: house-price-predictor
+          namespace: kubeflow
+          labels:
+            app: house-price-predictor
+        spec:
+          selector:
+            app: house-price-predictor
+          ports:
+          - port: 8000
+            targetPort: 8000
+            protocol: TCP
+            name: http
+          type: LoadBalancer
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: house-price-predictor
+          namespace: kubeflow
+          labels:
+            app: house-price-predictor
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: house-price-predictor
+          template:
+            metadata:
+              labels:
+                app: house-price-predictor
+                version: v1
+            spec:
+              containers:
+              - name: predictor
+                image: house-price-predictor:latest
+                imagePullPolicy: Always
+                command: ["uvicorn"]
+                args:
+                - "src.api.main:app"
+                - "--host"
+                - "0.0.0.0"
+                - "--port"
+                - "8000"
+                ports:
+                - containerPort: 8000
+                  name: http
+                env:
+                - name: MODEL_PATH
+                  value: "/models/trained/house_price_model.pkl"
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow-server:5000"
+                resources:
+                  requests:
+                    memory: "1Gi"
+                    cpu: "500m"
+                  limits:
+                    memory: "2Gi"
+                    cpu: "1"
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                volumeMounts:
+                - name: model-storage
+                  mountPath: /models
+              volumes:
+              - name: model-storage
+                persistentVolumeClaim:
+                  claimName: model-pvc

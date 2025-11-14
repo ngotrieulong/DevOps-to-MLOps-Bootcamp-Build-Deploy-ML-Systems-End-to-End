@@ -1,0 +1,31 @@
+jobs:
+  mlops-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requirements
+        run: pip install -r src/api/requirements.txt
+
+      - name: Run Data Processing
+        run: |
+          python src/scripts/data_processing.py \
+            --input data/raw/house_data.csv \
+            --output data/clean/cleaned_house_data.csv
+
+      - name: Run Feature Engineering
+        run: |
+          python src/scripts/feature_engineering.py \
+            --input data/clean/cleaned_house_data.csv \
+            --output data/processed/featured_house_data.csv
+
+      - name: Train Model
+        run: |
+          python src/scripts/train_model.py \
+            --config configs/model.yaml
