@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  fastapi: # <-- service name
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: longnt70/fastapi:latest
+    ports:
+      - "8000:8000"
+    container_name: fastapi-service
+
+  streamlit:
+    build:
+      context: ./streamlit_app
+      dockerfile: Dockerfile
+    image: longnt70/streamlit-app:latest
+    ports:
+      - "8501:8501"
+    environment:
+      API_URL: "http://fastapi:8000" # <-- reference FastAPI service by its name
+    container_name: streamlit-service
+
+
